@@ -61,6 +61,7 @@ to trim unneeded model memory = use (much) less RAM.
 """
 
 import logging
+from random import randrange
 import sys
 import os
 import heapq
@@ -153,6 +154,30 @@ except ImportError:
         return len([word for word in sentence if word is not None])
 
 
+l2_chance = 10000
+year_range = range(1850, 1890)
+lambd = .1
+def l2_normalization(model, word, alpha):
+    if word in model.vocab:
+        word_index = model.vocab[word].index
+        l1 = model.syn0[word_index]
+        parts = word.rsplit("_", 1)
+        year = int(parts[1])
+        previous = 0
+        if year > year_range[0]:
+            word_prev = parts[0]+str(year-1)
+            if word_prev in model.vocab:
+                word_prev_index = model.vocab[word_prev].index
+                previous = 2 * lambd * alpha * (l1 - model.syn0[word_prev_index])
+        nxt = 0
+        if year < year_range[-1]:
+            word_next = parts[0]+str(year+1)
+            if word_next in model.vocab:
+                word_next_index = model.vocab[word_next].index
+                nxt = 2 * lambd * alpha * (l1 - model.syn0[word_next_index])
+        model.syn0[word_index] += 2 * lambd * l1 + previous + nxt
+
+
 def train_sg_pair(model, word, word2, alpha, labels, train_w1=True, train_w2=True):
     l1 = model.syn0[word2.index]
     neu1e = zeros(l1.shape)
@@ -237,7 +262,7 @@ class Word2Vec(utils.SaveLoad):
     """
     def __init__(self, sentences=None, size=100, alpha=0.025, window=5, min_count=5,
         sample=0, seed=1, workers=1, min_alpha=0.0001, sg=1, hs=1, negative=0,
-        cbow_mean=0, hashfxn=hash, iter=1):
+        cbow_mean=0, hashfxn=hash):
         """
         Initialize the model from an iterable of `sentences`. Each sentence is a
         list of words (unicode strings) that will be used for training.
@@ -279,8 +304,6 @@ class Word2Vec(utils.SaveLoad):
         `hashfxn` = hash function to use to randomly initialize weights, for increased
         training reproducibility. Default is Python's rudimentary built in hash function.
 
-        `iter` = number of iterations (epochs) over the corpus.
-
         """
         self.vocab = {}  # mapping from a word (string) to a Vocab object
         self.index2word = []  # map from a word's matrix index (int) to word (string)
@@ -300,11 +323,11 @@ class Word2Vec(utils.SaveLoad):
         self.negative = negative
         self.cbow_mean = int(cbow_mean)
         self.hashfxn = hashfxn
-        self.iter = iter
         if sentences is not None:
             self.build_vocab(sentences)
-            sentences = utils.RepeatCorpusNTimes(sentences, iter)
             self.train(sentences)
+        print("word2vec!!!!!!!!!!!!!!!!!!!!!!!")
+
 
     def make_table(self, table_size=100000000, power=0.75):
         """
@@ -430,11 +453,18 @@ class Word2Vec(utils.SaveLoad):
             sampled = [self.vocab[word] for word in sentence
                        if word in self.vocab and (self.vocab[word].sample_probability >= 1.0 or
                                                   self.vocab[word].sample_probability >= random.random_sample())]
-            yield sampled
+            yield (sampled, sentence)
 
     def _get_job_words(self, alpha, work, job, neu1):
         if self.sg:
-            return sum(train_sentence_sg(self, sentence, alpha, work) for sentence in job)
+            total = 0
+            for (sentence, orig_sentence) in job:
+                if randrange(l2_chance) == 69:
+                    for word in orig_sentence:
+                        if word is not None:
+                            l2_normalization(self, word, alpha)
+                total += train_sentence_sg(self, sentence, alpha, work)
+            return total
         else:
             return sum(train_sentence_cbow(self, sentence, alpha, work, neu1) for sentence in job)
 
@@ -456,7 +486,7 @@ class Word2Vec(utils.SaveLoad):
 
         start, next_report = time.time(), [1.0]
         word_count = [word_count]
-        total_words = total_words or int(sum(v.count * v.sample_probability for v in itervalues(self.vocab)) * self.iter)
+        total_words = total_words or int(sum(v.count * v.sample_probability for v in itervalues(self.vocab)))
         jobs = Queue(maxsize=2 * self.workers)  # buffer ahead only a limited number of jobs.. this is the reason we can't simply use ThreadPool :(
         lock = threading.Lock()  # for shared state (=number of words trained so far, log reports...)
 
@@ -473,6 +503,7 @@ class Word2Vec(utils.SaveLoad):
                 alpha = max(self.min_alpha, self.alpha * (1 - 1.0 * word_count[0] / total_words))
                 # how many words did we train on? out-of-vocabulary (unknown) words do not count
                 job_words = self._get_job_words(alpha, work, job, neu1)
+
                 with lock:
                     word_count[0] += job_words
                     elapsed = time.time() - start
@@ -662,6 +693,13 @@ class Word2Vec(utils.SaveLoad):
         # ignore (don't return) words from the input
         result = [(self.index2word[sim], float(dists[sim])) for sim in best if sim not in all_words]
         return result[:topn]
+
+    def most_similar_to_vector(self, vector, topn=10):
+
+        input_unit_vec = matutils.unitvec(vector)
+        sims = [(dot(input_unit_vec, matutils.unitvec(self[w1])), w1) for w1 in self.vocab.keys()]
+        sims.sort()
+        return sims[-topn:]
 
     def most_similar_cosmul(self, positive=[], negative=[], topn=10):
         """
@@ -973,9 +1011,15 @@ class LineSentence(object):
                 yield utils.to_unicode(line).split()
         except AttributeError:
             # If it didn't work like a file, use it as a string filename
-            with utils.smart_open(self.source) as fin:
-                for line in fin:
-                    yield utils.to_unicode(line).split()
+            if type(self.source) is list:
+                for s in self.source:
+                    with utils.smart_open(s) as fin:
+                        for line in fin:
+                            yield utils.to_unicode(line).split()
+            else:
+                with utils.smart_open(self.source) as fin:
+                    for line in fin:
+                        yield utils.to_unicode(line).split()
 
 
 
